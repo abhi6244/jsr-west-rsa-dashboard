@@ -185,7 +185,7 @@
 
   <details class="block" open>
     <summary class="section-head">
-      <h2>1. Market Share, Participation &amp; Effectiveness — Month Range</h2>
+      <h2>1. Market Share, Participation &amp; Effectiveness</h2>
       <span class="chevron">▶</span>
     </summary>
     <div class="filter-row">
@@ -217,7 +217,7 @@
       <div class="chart-wrap tall"><canvas id="chartRange"></canvas></div>
     </div>
     <div class="card" style="margin-top:14px;">
-      <div style="font-size:13px; font-weight:600; color:var(--text-secondary); margin-bottom:8px;">Cumulative Market Share (<span id="rangeCumToLabel"></span>) — by OMC</div>
+      <div style="font-size:13px; font-weight:600; color:var(--text-secondary); margin-bottom:8px;">Cumulative <span id="rangeCumMetricLabel">Market Share</span> (<span id="rangeCumToLabel"></span>) — by OMC</div>
       <div class="chart-wrap"><canvas id="chartRangeCum"></canvas></div>
       <div class="small-note" id="rangeCumNote" style="margin-top:10px;"></div>
     </div>
@@ -585,6 +585,44 @@ let rangeScope = 'IND';
 let rangeProd = 'ms';
 let rangeView = 'line';
 
+// Cumulative (year-to-date), metric-aware version used by Section 1's second chart. Unlike the
+// Market-Share-only cumulativeShareByOMC() above (kept as-is since Section 2 depends on it), this
+// picks its output per the currently selected Metric tab:
+//  - share:         volume-weighted cumulative share (cum volume / cum total volume) — same maths as cumulativeShareByOMC
+//  - volume:        raw cumulative volume (KL) summed over the FY-to-date months
+//  - participation: participation is an outlet-count ratio, not a flow quantity, so it is averaged
+//                    (not summed) across the FY-to-date months
+//  - effectiveness: kept consistent with the monthly definition (share ÷ participation) by dividing
+//                    the cumulative share by the average cumulative participation
+function cumulativeRangeByOMC(toSortKey, prod, scope, metric){
+  const toIdx = MONTHLY_SERIES.findIndex(r=>r.sort_key===toSortKey);
+  if(toIdx<0) return null;
+  const fyIdx = fyStartIndexFor(toIdx);
+  const rows = MONTHLY_SERIES.slice(fyIdx, toIdx+1);
+  const denomOmcs = scope==='IND' ? ALL_OMC : PSU_OMC;
+  const partKey = scope==='IND' ? 'participation_ind' : 'participation_psu';
+  const cumVol = {}; const partSum = {}; const partCount = {};
+  ALL_OMC.forEach(o=>{ cumVol[o]=0; partSum[o]=0; partCount[o]=0; });
+  rows.forEach(r=>{
+    ALL_OMC.forEach(o=>{
+      const v = r.omc[o] ? r.omc[o][`${prod}_vol`] : 0;
+      cumVol[o] += (v || 0);
+      const p = r.omc[o] ? r.omc[o][partKey] : null;
+      if(p!==null && p!==undefined){ partSum[o] += p; partCount[o] += 1; }
+    });
+  });
+  const total = denomOmcs.reduce((s,o)=> s + cumVol[o], 0);
+  const shares = {}; ALL_OMC.forEach(o=> shares[o] = total>0 ? cumVol[o]/total : null);
+  const avgPart = {}; ALL_OMC.forEach(o=> avgPart[o] = partCount[o]>0 ? partSum[o]/partCount[o] : null);
+  const eff = {}; ALL_OMC.forEach(o=> eff[o] = (shares[o]!==null && avgPart[o]) ? shares[o]/avgPart[o] : null);
+  let values;
+  if(metric==='volume') values = cumVol;
+  else if(metric==='participation') values = avgPart;
+  else if(metric==='effectiveness') values = eff;
+  else values = shares;
+  return { values, shares, cumVol, avgPart, eff, total, fromLabel: MONTHLY_SERIES[fyIdx].label, toLabel: MONTHLY_SERIES[toIdx].label, monthCount: rows.length };
+}
+
 function populateRangeSelects(){
   const fromSel = document.getElementById('rangeFrom');
   const toSel = document.getElementById('rangeTo');
@@ -691,29 +729,44 @@ function renderRangeChart(){
 
 function renderRangeCumChart(){
   const toKey = document.getElementById('rangeTo').value;
-  const res = cumulativeShareByOMC(toKey, rangeProd, rangeScope);
+  const res = cumulativeRangeByOMC(toKey, rangeProd, rangeScope, rangeMetric);
   destroyIfExists('rangeCum');
   if(!res) return;
   const textColor = cssVar('--text-secondary'); const gridColor = cssVar('--grid');
   const omcs = rangeOMCList();
-  const data = omcs.map(o=> res.shares[o]===null||res.shares[o]===undefined ? null : res.shares[o]*100);
+  const unit = rangeMetric==='effectiveness' ? 'index' : (rangeMetric==='volume' ? 'volume' : 'pct');
+  const data = omcs.map(o=>{
+    const v = res.values[o];
+    if(v===null||v===undefined) return null;
+    return unit==='pct' ? v*100 : v;
+  });
   const prodLabel = rangeProd==='ms' ? 'MS (Petrol)' : 'HSD (Diesel)';
+  const metricLabel = rangeMetric==='participation' ? 'Market Participation' : (rangeMetric==='effectiveness' ? 'Market Effectiveness' : (rangeMetric==='volume' ? 'Sales Volume' : 'Market Share'));
+  document.getElementById('rangeCumMetricLabel').textContent = metricLabel;
   document.getElementById('rangeCumToLabel').textContent = res.fromLabel===res.toLabel ? res.toLabel : `${res.fromLabel} – ${res.toLabel}`;
+  const yTitle = unit==='index' ? 'Effectiveness Index (x)' : (unit==='volume' ? 'Volume (KL)' : `Cumulative ${metricLabel} %`);
 
   chartRefs.rangeCum = new Chart(document.getElementById('chartRangeCum'), {
     type:'bar',
-    data:{ labels: omcs, datasets:[{ label:'Cumulative Market Share', data, backgroundColor: omcs.map(o=>omcColor(o)), borderRadius:4, maxBarThickness:70, categoryPercentage:0.6, barPercentage:0.9 }] },
+    data:{ labels: omcs, datasets:[{ label:`Cumulative ${metricLabel}`, data, backgroundColor: omcs.map(o=>omcColor(o)), borderRadius:4, maxBarThickness:70, categoryPercentage:0.6, barPercentage:0.9 }] },
     options:{ responsive:true, maintainAspectRatio:false,
       plugins:{ legend:{display:false},
-        tooltip:{callbacks:{label:(ctx)=> `${ctx.label}: ${ctx.raw===null?'–':ctx.raw.toFixed(1)+'%'}`}},
-        barValueLabels:{ color:textColor, formatter:(v)=> v.toFixed(1)+'%' } },
+        tooltip:{callbacks:{label:(ctx)=> `${ctx.label}: ${ctx.raw===null?'–':(unit==='pct'? ctx.raw.toFixed(1)+'%' : unit==='index'? ctx.raw.toFixed(2)+'x' : fmt(ctx.raw,1)+' KL')}`}},
+        barValueLabels:{ color:textColor, formatter:(v)=> unit==='pct'? v.toFixed(1)+'%' : unit==='index'? v.toFixed(2)+'x' : fmt(v,0) } },
       scales:{ x:{ grid:{display:false}, ticks:{color:textColor} },
-                y:{ grid:{color:gridColor}, ticks:{color:textColor, callback:(v)=> Math.round(v*10)/10+'%'}, title:{display:true, text:`Cumulative Market Share % (${prodLabel})`, color:textColor, font:{size:11}} } }
+                y:{ grid:{color:gridColor}, ticks:{color:textColor, callback:(v)=> unit==='pct'? Math.round(v*10)/10+'%' : unit==='index'? Math.round(v*100)/100+'x' : fmt(v,0)}, title:{display:true, text:`${yTitle}${rangeMetric!=='participation'?' ('+prodLabel+')':''}`, color:textColor, font:{size:11}} } }
     }
   });
 
+  const methodNote = rangeMetric==='volume'
+    ? `Year-to-date: actual monthly ${prodLabel} volumes summed from ${res.fromLabel} (start of that fiscal year) through ${res.toLabel} (the selected 'To' month above)`
+    : rangeMetric==='participation'
+    ? `Year-to-date average: mean of each OMC's monthly Market Participation (outlet-count share) from ${res.fromLabel} through ${res.toLabel}`
+    : rangeMetric==='effectiveness'
+    ? `Year-to-date: cumulative Market Share (volume-weighted, ${prodLabel}) ÷ average Market Participation, from ${res.fromLabel} through ${res.toLabel}`
+    : `Year-to-date: actual monthly volumes summed from ${res.fromLabel} (start of that fiscal year) through ${res.toLabel} (the selected 'To' month above), then Market Share computed on the cumulative totals`;
   document.getElementById('rangeCumNote').textContent =
-    `Year-to-date: actual monthly volumes summed from ${res.fromLabel} (start of that fiscal year) through ${res.toLabel} (the selected 'To' month above), then Market Share computed on the cumulative totals — ${prodLabel}, ${rangeScope} scope, ${res.monthCount} month(s) accumulated.`;
+    `${methodNote} — ${prodLabel}, ${rangeScope} scope, ${res.monthCount} month(s) accumulated.`;
 }
 
 document.querySelectorAll('.filter-row .chip[data-metric]').forEach(c=>{
@@ -722,6 +775,7 @@ document.querySelectorAll('.filter-row .chip[data-metric]').forEach(c=>{
     c.classList.add('active');
     rangeMetric = c.dataset.metric;
     renderRangeChart();
+    renderRangeCumChart();
   });
 });
 document.querySelectorAll('.filter-row .chip[data-scope3]').forEach(c=>{
